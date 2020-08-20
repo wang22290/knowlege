@@ -1,0 +1,356 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/><meta name="exporter-version" content="Evernote Mac 9.4.1 (460875)"/><meta name="author" content="wagn"/><meta name="created" content="2020-08-20 03:03:09 +0000"/><meta name="source" content="desktop.mac"/><meta name="updated" content="2020-08-20 09:04:54 +0000"/><meta name="content-class" content="yinxiang.markdown"/><title>SDwebImage  YYImage  lottie 加载gif 动画,性能比较，图片加载框架选型分析</title></head><body><div style="font-size: 14px; margin: 0; padding: 0; width: 100%;"><p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">最近项目改版，要加载好几个gif的动画，刚开始尝试使用了SDwebImage来加载显示，可以正常显示，但加载多个gif的时候会被闪退，查找原因是内存爆增引起的。<br/>
+后来有尝试使用YYkit 框架，来加载gif 动画，YYKit 加载gif 的时候不会引起内存问题，但是CPU的使用率会很高，<br/>
+最后我使用的是lottie 动画，加载会比较友善，不会存在内存和CPU的问题，<br/>
+接下来我们依次来分析一下相关的代码</p>
+<h4 style="line-height: 160%; box-sizing: content-box; font-size: 20px; color: #333;">1、SDwebImage</h4>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">@property (nonatomic, strong) UIImageView  *gifImageview;
+
+self.gifImageview = [[SDAnimatedImageView alloc]init];
+    [self.view addSubview:self.gifImageview];
+[self.gifImageview mas_makeConstraints:^(MASConstraintMaker *make) {
+        make.left.right.mas_equalTo(self.view);
+        make.centerY.mas_equalTo(self.view);
+        make.height.equalTo(@(200));
+    }];
+
+ //&nbsp;&nbsp;这里我使用的是本地的文件，本gif 内存是1.3M 包含60张图片
+NSString *path = [[NSBundle mainBundle] pathForResource:[NSString stringWithFormat:@"转场_1"] ofType:@"gif"];
+NSData *data = [NSData dataWithContentsOfFile:path];
+UIImage *image = [UIImage sd_imageWithGIFData:data];    [self.gifImageview setImage:image];
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">加载出来通过Xcode 查看，发现Memory 会很高，如下图，这个是单独一个gif，我如果加载3个gif，Memory会爆增到2G<br/>
+<img src="SDwebImage%20%20YYImage%20%20lottie%20%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB,%E6%80%A7%E8%83%BD%E6%AF%94%E8%BE%83%EF%BC%8C%E5%9B%BE%E7%89%87%E5%8A%A0%E8%BD%BD%E6%A1%86%E6%9E%B6%E9%80%89%E5%9E%8B%E5%88%86%E6%9E%90.resources/A2BEF8E8-CD5D-40CB-ABD0-86ADD1F7A671.png" height="580" width="1137"/><br/>
+1、我们通过sdwebImage 的源码分析一下问题的存在<br/>
+<code style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; color: #c1788b; padding: 4px 4px 2px 0; letter-spacing: -.3px;">sd_imageWithGIFData</code>是SDwebImage 的 UIImage+GIF中方法，里面直接调用 <code style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; color: #c1788b; padding: 4px 4px 2px 0; letter-spacing: -.3px;">[[SDImageGIFCoder sharedCoder] decodedImageWithData:data options:0];</code>，接下来我们直接看一下<code style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; color: #c1788b; padding: 4px 4px 2px 0; letter-spacing: -.3px;">decodedImageWithData</code> 的源码</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">#import "SDImageIOAnimatedCoder.h"
+- (UIImage *)decodedImageWithData:(NSData *)data options:(nullable SDImageCoderOptions *)options {
+//安全判断
+    if (!data) {
+        return nil;
+    }
+    CGFloat scale = 1;
+    //option 为 nil ，scalefactor  thumbnailSizeValue 暂时无用
+    NSNumber *scaleFactor = options[SDImageCoderDecodeScaleFactor];
+    if (scaleFactor != nil) {
+        scale = MAX([scaleFactor doubleValue], 1);
+    }
+    
+    CGSize thumbnailSize = CGSizeZero;
+    //解码缩略图像素大小
+    NSValue *thumbnailSizeValue = options[SDImageCoderDecodeThumbnailPixelSize];
+    if (thumbnailSizeValue != nil) {
+#if SD_MAC
+        thumbnailSize = thumbnailSizeValue.sizeValue;
+#else
+        thumbnailSize = thumbnailSizeValue.CGSizeValue;
+#endif
+    }
+    
+    BOOL preserveAspectRatio = YES;
+    NSNumber *preserveAspectRatioValue = options[SDImageCoderDecodePreserveAspectRatio];
+    if (preserveAspectRatioValue != nil) {
+        preserveAspectRatio = preserveAspectRatioValue.boolValue;
+    }
+    
+#if SD_MAC
+    // If don't use thumbnail, prefers the built-in generation of frames (GIF/APNG)
+    // Which decode frames in time and reduce memory usage
+    if (thumbnailSize.width == 0 || thumbnailSize.height == 0) {
+        SDAnimatedImageRep *imageRep = [[SDAnimatedImageRep alloc] initWithData:data];
+        NSSize size = NSMakeSize(imageRep.pixelsWide / scale, imageRep.pixelsHigh / scale);
+        imageRep.size = size;
+        NSImage *animatedImage = [[NSImage alloc] initWithSize:size];
+        [animatedImage addRepresentation:imageRep];
+        return animatedImage;
+    }
+#endif
+    //二进制类型的转换
+    //CGImageSourceRef是个什么呢? 我们可以看到这是一个typedef CGImageSource * CGImageSourceRef;
+    //这是一个指针,CGImageSource是对图像数据读取任务的抽象，通过它可以获得图像对象、缩略图、图像的属性(包括Exif信息)。
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!source) {
+        return nil;
+    }
+    //获取有几张图片
+    size_t count = CGImageSourceGetCount(source);
+    //返回的动态图片
+    UIImage *animatedImage;
+    
+    BOOL decodeFirstFrame = [options[SDImageCoderDecodeFirstFrameOnly] boolValue];
+    if (decodeFirstFrame || count &lt;= 1) {
+        animatedImage = [self.class createFrameAtIndex:0 source:source scale:scale preserveAspectRatio:preserveAspectRatio thumbnailSize:thumbnailSize options:nil];
+    } else {
+    //集合 存放单张的图片
+        NSMutableArray&lt;SDImageFrame *&gt; *frames = [NSMutableArray array];
+        
+        for (size_t i = 0; i &lt; count; i++) {
+//            获取gif每一帧图像
+            UIImage *image = [self.class createFrameAtIndex:i source:source scale:scale preserveAspectRatio:preserveAspectRatio thumbnailSize:thumbnailSize options:nil];
+            if (!image) {
+                continue;
+            }
+            // 获取每一帧图像对应的显示时间
+            NSTimeInterval duration = [self.class frameDurationAtIndex:i source:source];
+            //创建动图
+            SDImageFrame *frame = [SDImageFrame frameWithImage:image duration:duration];
+            [frames addObject:frame];
+//            作者获取每一帧图像的显示时间的目的仅仅是为了计算gif动画的总时长，并没有给每一帧图像的显示时间分配相应的权重，导致每一帧图像显示的时间为平均时间
+        }
+        
+        NSUInteger loopCount = [self.class imageLoopCountWithSource:source];
+        NSLog(@"%lu",(unsigned long)loopCount);
+        //把静态的图片转换为动态的image,所以会有大量单张的图片存放在内存中
+        animatedImage = [SDImageCoderHelper animatedImageWithFrames:frames];
+        animatedImage.sd_imageLoopCount = loopCount;
+    }
+    animatedImage.sd_imageFormat = self.class.imageFormat;
+    //释放图像数据读取任务的抽象对象
+    CFRelease(source);
+    
+    return animatedImage;
+}
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">发现SDWebImage处理gif图片的方法是：将gif资源中每一张imgae写入到内存中，通过animatedImageWithImages的方式播放动画。这样的好处是，gif轮询播放时，直接从内存中取资源就好了，降低了cpu的占用。也就是说，SDWebImage是以空间换取的流畅度。</p>
+<h4 style="line-height: 160%; box-sizing: content-box; font-size: 20px; color: #333;">2 YYKIt</h4>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">我们来创建 imageView ，展示我们的内容</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">@property (nonatomic,strong) YYAnimatedImageView *YYImageView;
+
+self.YYImageView = [[YYAnimatedImageView alloc]init];
+[self.view addSubview:self.YYImageView];
+
+[self.YYImageView mas_makeConstraints:^(MASConstraintMaker *make) {
+     make.left.right.mas_equalTo(self.view);
+     make.centerY.mas_equalTo(self.view);
+     make.height.equalTo(@(200));
+ }];
+ 
+ YYImage *yyimage = [YYImage imageNamed:@"转场_1"];
+ [self.YYImageView setImage:yyimage];
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">YYkit 加载gif 的过程中，memory 基本不会过度使用，但是最初会有一段时间CPU的使用率会很高达到 98 %，<br/>
+<img src="SDwebImage%20%20YYImage%20%20lottie%20%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB,%E6%80%A7%E8%83%BD%E6%AF%94%E8%BE%83%EF%BC%8C%E5%9B%BE%E7%89%87%E5%8A%A0%E8%BD%BD%E6%A1%86%E6%9E%B6%E9%80%89%E5%9E%8B%E5%88%86%E6%9E%90.resources/2BA9BA5C-A503-4DEF-920F-FC05EB26E1A1.png" height="740" width="1110"/></p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">
+    if (!_finalized &amp;&amp; index &gt; 0) return NULL;
+    if (_frames.count &lt;= index) return NULL;
+    _YYImageDecoderFrame *frame = _frames[index];
+    
+    if (_source) {
+        CGImageRef imageRef = CGImageSourceCreateImageAtIndex(_source, index, (CFDictionaryRef)@{(id)kCGImageSourceShouldCache:@(YES)});
+        if (imageRef &amp;&amp; extendToCanvas) {
+            size_t width = CGImageGetWidth(imageRef);
+            size_t height = CGImageGetHeight(imageRef);
+            if (width == _width &amp;&amp; height == _height) {
+           // 每次的展示都会调用create 方法 
+                CGImageRef imageRefExtended = YYCGImageCreateDecodedCopy(imageRef, YES);
+                if (imageRefExtended) {
+                    CFRelease(imageRef);
+                    imageRef = imageRefExtended;
+                    if (decoded) *decoded = YES;
+                }
+            } else {
+                CGContextRef context = CGBitmapContextCreate(NULL, _width, _height, 8, 0, YYCGColorSpaceGetDeviceRGB(), kCGBitmapByteOrder32Host | kCGImageAlphaPremultipliedFirst);
+                if (context) {
+                    CGContextDrawImage(context, CGRectMake(0, _height - height, width, height), imageRef);
+                    CGImageRef imageRefExtended = CGBitmapContextCreateImage(context);
+                    CFRelease(context);
+                    if (imageRefExtended) {
+                        CFRelease(imageRef);
+                        imageRef = imageRefExtended;
+                        if (decoded) *decoded = YES;
+                    }
+                }
+            }
+        }
+        return imageRef;
+    }
+    
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">发现了YYKit处理gif图片的方法是：每次从缓存的gif中，读取当前需要展示的image，进行动画展示。这样做的好处是，不用为gif的每张image开辟空间了，每次都是从一份gif资源中读取一张image就好了。以一定的帧率从缓冲中解析出当前需要展示的image，肯定是需要耗用cpu的。</p>
+<h4 style="line-height: 160%; box-sizing: content-box; font-size: 20px; color: #333;">3、lottie</h4>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">我们先来创建一个lottie，lottie 加载gif 动画需要把动画转换成json数据，</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">@property (nonatomic, strong) LOTAnimationView  *loImageView;
+
+self.loImageView = [LOTAnimationView animationNamed:@"1"];
+[self.loImageView play];
+self.loImageView.loopAnimation = YES;
+[self.view addSubview:self.loImageView];
+[self.loImageView mas_makeConstraints:^(MASConstraintMaker *make) {
+     make.left.right.mas_equalTo(self.view);
+     make.centerY.mas_equalTo(self.view);
+     make.height.equalTo(@(200));
+}];
+
+ self.loImageView2 = [LOTAnimationView animationNamed:@"2"];
+ [self.loImageView2 play];
+ [self.view addSubview:self.loImageView2];
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">通过lottie 加载同样的gif动画看到的CPU 和memory 的数据<br/>
+<img src="SDwebImage%20%20YYImage%20%20lottie%20%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB,%E6%80%A7%E8%83%BD%E6%AF%94%E8%BE%83%EF%BC%8C%E5%9B%BE%E7%89%87%E5%8A%A0%E8%BD%BD%E6%A1%86%E6%9E%B6%E9%80%89%E5%9E%8B%E5%88%86%E6%9E%90.resources/C8227BA0-B778-419D-8711-5DDB9220944D.png" height="697" width="1125"/></p>
+<h5 style="line-height: 160%; box-sizing: content-box; font-weight: 700; font-size: 16px; color: #333;">3-1 接下来我们看一下lottie 的原理，具体使用方法请参考（）<a href="https://juejin.im/post/6844903576272125966" style="line-height: 160%; box-sizing: content-box; text-decoration: underline; color: #5286bc;">iOS Lottie动画接入过程详解</a></h5>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">1、Lottie是Airbnb开源的一个动画渲染库，支持多平台，包括iOS、Android、React Native以及Flutter（https://github.com/airbnb/lottie-ios）。除了官方支持的平台，更有大神实现了支持Windows、Qt、Skia以及React、Vue、Angular等平台<br/>
+Lottie动画产生的流程如下：<br/>
+<img src="SDwebImage%20%20YYImage%20%20lottie%20%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB,%E6%80%A7%E8%83%BD%E6%AF%94%E8%BE%83%EF%BC%8C%E5%9B%BE%E7%89%87%E5%8A%A0%E8%BD%BD%E6%A1%86%E6%9E%B6%E9%80%89%E5%9E%8B%E5%88%86%E6%9E%90.resources/2655106F-6D39-4994-83EC-608BAD167CA3.png" height="245" width="481"/></p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">注意点：Lottie 3.0之后已经全部使用swift实现，所以如果需要使用Objective-C版本需要使用Lottie 2.5.3版本</p>
+<h5 style="line-height: 160%; box-sizing: content-box; font-weight: 700; font-size: 16px; color: #333;">3-2 Lottie 原理</h5>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">1、需要我们的设计把gif 动画专程json<br/>
+例如：<br/>
+<img src="SDwebImage%20%20YYImage%20%20lottie%20%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB,%E6%80%A7%E8%83%BD%E6%AF%94%E8%BE%83%EF%BC%8C%E5%9B%BE%E7%89%87%E5%8A%A0%E8%BD%BD%E6%A1%86%E6%9E%B6%E9%80%89%E5%9E%8B%E5%88%86%E6%9E%90.resources/4D4B4C18-53A0-416D-8288-7CE3EB8DA0A2.png" height="933" width="877"/><br/>
+Lottie整体的原理如下：</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">1）首先要知道，一个完整动画View，是由很多个子Layer 组成，而每个子Layer主要通过shapes（形状），masks（蒙版），transform三大部分进行动画。
+2）Lottie框架通过读取JSON文件，获取到每个子Layer 的shapes，masks，以及出现时间，消失时间以及Transform各个属性的关键帧数组。
+3）动画则是通过给CompositionLayer （所有的子layer都添加在这个Layer 上）的 currentFrame属性添加一个CABaseAnimation 来实现。
+4）所有的子Layer根据currentFrame 属性的变化，根据JSON中的关键帧数组计算出自己的当前状态并进行显示。
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">接下来让我们深入它的源码（OC版本）去看看，对它的原理有一个更深刻的认识</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">1）入口类为LOTAnimationView，提供了一系列加载和设置动画的方法及属性以及对动画的操作，这里列举一二</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">+ (nonnull instancetype)animationNamed:(nonnull NSString *)animationName NS_SWIFT_NAME(init(name:));
++ (nonnull instancetype)animationFromJSON:(nonnull NSDictionary *)animationJSON NS_SWIFT_NAME(init(json:));
++ (nonnull instancetype)animationFromJSON:(nullable NSDictionary *)animationJSON 
+inBundle:(nullable NSBundle *)bundle NS_SWIFT_NAME(init(json:bundle:));
+...
+@property (nonatomic, assign) CGFloat animationProgress;
+@property (nonatomic, assign) CGFloat animationSpeed;
+...
+- (void)play;
+- (void)pause; 
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">LOTAnimationView所有的加载方法，最终执行的都是把JSON字典传到LOTComposition类中，组装LOTComposition对象，当然还会有一些缓存获取，值判断等的逻辑，但是核心就是产生一个LOTComposition对象：</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">+ (nullable instancetype)animationNamed:(nonnull NSString *)animationName inBundle:(nonnull NSBundle *)bundle {
+  ...
+  if (JSONObject &amp;&amp; !error) {
+    LOTComposition *laScene = [[self alloc] initWithJSON:JSONObject withAssetBundle:bundle];
+    [[LOTAnimationCache sharedCache] addAnimation:laScene forKey:animationName];
+    laScene.cacheKey = animationName;
+    return laScene;
+  }
+  NSLog(@"%s: Animation Not Found", __PRETTY_FUNCTION__);
+  return nil;
+}
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">2）LOTComposition类用来解析整个动画的json字典，获取整个动画所需的数据。</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">- (void)_mapFromJSON:(NSDictionary *)jsonDictionary
+     withAssetBundle:(NSBundle *)bundle {
+  NSNumber *width = jsonDictionary[@"w"];
+  NSNumber *height = jsonDictionary[@"h"];
+  if (width &amp;&amp; height) {
+    CGRect bounds = CGRectMake(0, 0, width.floatValue, height.floatValue);
+    _compBounds = bounds;
+  }
+  
+  _startFrame = [jsonDictionary[@"ip"] copy];
+  _endFrame = [jsonDictionary[@"op"] copy];
+  _framerate = [jsonDictionary[@"fr"] copy];
+  
+  if (_startFrame &amp;&amp; _endFrame &amp;&amp; _framerate) {
+    NSInteger frameDuration = (_endFrame.integerValue - _startFrame.integerValue) - 1;
+    NSTimeInterval timeDuration = frameDuration / _framerate.floatValue;
+    _timeDuration = timeDuration;
+  }
+  
+  NSArray *assetArray = jsonDictionary[@"assets"];
+  if (assetArray.count) {
+    _assetGroup = [[LOTAssetGroup alloc] initWithJSON:assetArray withAssetBundle:bundle withFramerate:_framerate];
+  }
+  
+  NSArray *layersJSON = jsonDictionary[@"layers"];
+  if (layersJSON) {
+    _layerGroup = [[LOTLayerGroup alloc] initWithLayerJSON:layersJSON
+                                            withAssetGroup:_assetGroup
+                                             withFramerate:_framerate];
+  }
+  
+  [_assetGroup finalizeInitializationWithFramerate:_framerate];
+}
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">在对JSON字典的解析过程中，会拆分成几种不同的信息，包括：整体关键帧信息、所需图片资源信息、所有子layer的信息。并将图片组和layer组分别传入到LOTAssetGroup和LOTLayerGroup中做进一步处理。</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">3）LOTLayerGroup类用于解析JSON中“layers”层的数据，并将单独的layer数据传递给LOTLayer处理。核心代码如下：</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">- (void)_mapFromJSON:(NSArray *)layersJSON
+      withAssetGroup:(LOTAssetGroup * _Nullable)assetGroup
+       withFramerate:(NSNumber *)framerate {
+  
+  NSMutableArray *layers = [NSMutableArray array];
+  NSMutableDictionary *modelMap = [NSMutableDictionary dictionary];
+  NSMutableDictionary *referenceMap = [NSMutableDictionary dictionary];
+  
+  for (NSDictionary *layerJSON in layersJSON) {
+    LOTLayer *layer = [[LOTLayer alloc] initWithJSON:layerJSON
+                                      withAssetGroup:assetGroup
+                                       withFramerate:framerate];
+    [layers addObject:layer];
+    modelMap[layer.layerID] = layer;
+    if (layer.referenceID) {
+      referenceMap[layer.referenceID] = layer;
+    }
+  }
+  
+  _referenceIDMap = referenceMap;
+  _modelMap = modelMap;
+  _layers = layers;
+}
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">4）接下来进入LOTLayer类中，这里最终把json文件中单个layer对应的数据映射出来。</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">@property (nonatomic, readonly) NSString *layerName;
+@property (nonatomic, readonly, nullable) NSString *referenceID;
+@property (nonatomic, readonly) NSNumber *layerID;
+@property (nonatomic, readonly) LOTLayerType layerType;
+@property (nonatomic, readonly, nullable) NSNumber *parentID;
+@property (nonatomic, readonly) NSNumber *startFrame;
+@property (nonatomic, readonly) NSNumber *inFrame;
+@property (nonatomic, readonly) NSNumber *outFrame;
+@property (nonatomic, readonly) NSNumber *timeStretch;
+@property (nonatomic, readonly) CGRect layerBounds;
+@property (nonatomic, readonly, nullable) NSArray&lt;LOTShapeGroup *&gt; *shapes;
+@property (nonatomic, readonly, nullable) NSArray&lt;LOTMask *&gt; *masks;
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">以上属性和json文件对应的key有一一对应关系，比如layerName对应json文件中的nm，layerType对应ty等等，每个layer中包含Layer所需的基本信息，transform变化需要的则是每个LOTKeyframeGroup 类型的属性。这里面包含了该Layer 的 transform变化的关键帧数组，而masks 和 shapes 的信息包含在上面的两个同名数组中。</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">5)前面四步，已经把动画需要的数据全部准备好了，接下来就需要进行动画显示。<br/>
+最底层的LOTLayerContainer继承自CALayer，添加了currentFrame属性，LOTCompositionContainer又是继承自LOTLayerContainer，为LOTCompositionContainer对象添加了一个CABaseAnimation动画，然后重写CALayer的display方法，在display方法中通过 CALayer中的presentationLayer获取在动画中变化的currentFrame数值 ，再通过遍历每一个子layer，将更新后的currentFrame传入，来实时更新每一个子Layer的显示。核心代码在LOTLayerContainer中，如下：</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">- (void)displayWithFrame:(NSNumber *)frame forceUpdate:(BOOL)forceUpdate {
+  NSNumber *newFrame = @(frame.floatValue / self.timeStretchFactor.floatValue);
+  if (ENABLE_DEBUG_LOGGING) NSLog(@"View %@ Displaying Frame %@, with local time %@", self, frame, newFrame);
+  BOOL hidden = NO;
+  if (_inFrame &amp;&amp; _outFrame) {
+    hidden = (frame.floatValue &lt; _inFrame.floatValue ||
+              frame.floatValue &gt; _outFrame.floatValue);
+  }
+  self.hidden = hidden;
+  if (hidden) {
+    return;
+  }
+  if (_opacityInterpolator &amp;&amp; [_opacityInterpolator hasUpdateForFrame:newFrame]) {
+    self.opacity = [_opacityInterpolator floatValueForFrame:newFrame];
+  }
+  if (_transformInterpolator &amp;&amp; [_transformInterpolator hasUpdateForFrame:newFrame]) {
+    _wrapperLayer.transform = [_transformInterpolator transformForFrame:newFrame];
+  }
+  [_contentsGroup updateWithFrame:newFrame withModifierBlock:nil forceLocalUpdate:forceUpdate];
+  _maskLayer.currentFrame = newFrame;
+}
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">它实际上完成了以下几件事：<br/>
+1.根据子Layer的起始帧和结束帧判断当前帧子Layer是否显示<br/>
+2.更新子Layer当前帧的透明度<br/>
+3.更新子Layer当前帧的transform<br/>
+4.更新子Layer中路径和形状等内容的变化</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">6）上面动画显示的2，3，4步都是通过XXInterpolator这些类，来从当前frame中计算出我们需要的值，我们以LOTTransformInterpolator为例，其他类似，看看它都有些什么：</p>
+<pre style="line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; margin: 2px 0 8px; background-color: #f5f7f8;"><code style="display: block; overflow-x: auto; background: #1e1e1e; line-height: 160%; box-sizing: content-box; border: 0; border-radius: 0; letter-spacing: -.3px; padding: 18px; color: #f4f4f4; white-space: pre-wrap;">@property (nonatomic, readonly) LOTPointInterpolator *positionInterpolator;
+@property (nonatomic, readonly) LOTPointInterpolator *anchorInterpolator;
+@property (nonatomic, readonly) LOTSizeInterpolator *scaleInterpolator;
+@property (nonatomic, readonly) LOTNumberInterpolator *rotationInterpolator;
+@property (nonatomic, readonly) LOTNumberInterpolator *positionXInterpolator;
+@property (nonatomic, readonly) LOTNumberInterpolator *positionYInterpolator;
+</code></pre>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">针对transform变换需要很多的信息，LOTTransformInterpolator中提供了这些所需的信息。</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">当传入当前frame时，这些interpolator会返回不同的数值，从而组成当前的transform。这些不同的Interpolar会根据自己的算法返回当前所需要的值，但是他们大体的流程都是一样的：</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">1.在关键帧数组中找到当前frame的前一个关键帧（leadingKeyframe）和后一个关键帧（trailingKeyframe）<br/>
+2.计算当前frame 在 leadingKeyframe 和 trailingKeyframe 的进度（progress）<br/>
+3.根据这个progress以及 leadingKeyframe，trailingKeyframe算出当前frame下的值。（不同的Interpolator算法不同）</p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">总结：<br/>
+Lottie提供了多种便利的方式，供我们加载酷炫的动画，对用户体验有极大的提升。对使用者来说，只需要引入包含动效的json文件和资源文件，调用lottie提供的属性和api完成动画绘制。Lottie内部帮我们做了json文件映射到不同类的不同属性中，通过一系列的计算，确定出每一帧的数据，然后完美的显示在屏幕上，这样的神器，以后要多多用起来啦！</p>
+<hr style="line-height: 160%; box-sizing: content-box; border-top: 1px solid #eee; margin: 16px 0;"/>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;">参考文章：<a href="https://blog.csdn.net/studying_ios/article/details/90898282" style="line-height: 160%; box-sizing: content-box; text-decoration: underline; color: #5286bc;">Lottie动画使用及原理分析</a></p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;"><a href="https://cloud.tencent.com/developer/article/1403845" style="line-height: 160%; box-sizing: content-box; text-decoration: underline; color: #5286bc;">YYText 源码剖析：CoreText 与异步绘制</a></p>
+<p style="line-height: 160%; box-sizing: content-box; margin: 10px 0; color: #333;"><a href="https://lision.me/tags/yykit/" style="line-height: 160%; box-sizing: content-box; text-decoration: underline; color: #5286bc;">YYImage 设计思路，实现细节剖析</a></p>
+</div><center style="display:none !important;visibility:collapse !important;height:0 !important;white-space:nowrap;width:100%;overflow:hidden">%E6%9C%80%E8%BF%91%E9%A1%B9%E7%9B%AE%E6%94%B9%E7%89%88%EF%BC%8C%E8%A6%81%E5%8A%A0%E8%BD%BD%E5%A5%BD%E5%87%A0%E4%B8%AAgif%E7%9A%84%E5%8A%A8%E7%94%BB%EF%BC%8C%E5%88%9A%E5%BC%80%E5%A7%8B%E5%B0%9D%E8%AF%95%E4%BD%BF%E7%94%A8%E4%BA%86SDwebImage%E6%9D%A5%E5%8A%A0%E8%BD%BD%E6%98%BE%E7%A4%BA%EF%BC%8C%E5%8F%AF%E4%BB%A5%E6%AD%A3%E5%B8%B8%E6%98%BE%E7%A4%BA%EF%BC%8C%E4%BD%86%E5%8A%A0%E8%BD%BD%E5%A4%9A%E4%B8%AAgif%E7%9A%84%E6%97%B6%E5%80%99%E4%BC%9A%E8%A2%AB%E9%97%AA%E9%80%80%EF%BC%8C%E6%9F%A5%E6%89%BE%E5%8E%9F%E5%9B%A0%E6%98%AF%E5%86%85%E5%AD%98%E7%88%86%E5%A2%9E%E5%BC%95%E8%B5%B7%E7%9A%84%E3%80%82%0A%E5%90%8E%E6%9D%A5%E6%9C%89%E5%B0%9D%E8%AF%95%E4%BD%BF%E7%94%A8YYkit%20%E6%A1%86%E6%9E%B6%EF%BC%8C%E6%9D%A5%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB%EF%BC%8CYYKit%20%E5%8A%A0%E8%BD%BDgif%20%E7%9A%84%E6%97%B6%E5%80%99%E4%B8%8D%E4%BC%9A%E5%BC%95%E8%B5%B7%E5%86%85%E5%AD%98%E9%97%AE%E9%A2%98%EF%BC%8C%E4%BD%86%E6%98%AFCPU%E7%9A%84%E4%BD%BF%E7%94%A8%E7%8E%87%E4%BC%9A%E5%BE%88%E9%AB%98%EF%BC%8C%0A%E6%9C%80%E5%90%8E%E6%88%91%E4%BD%BF%E7%94%A8%E7%9A%84%E6%98%AFlottie%20%E5%8A%A8%E7%94%BB%EF%BC%8C%E5%8A%A0%E8%BD%BD%E4%BC%9A%E6%AF%94%E8%BE%83%E5%8F%8B%E5%96%84%EF%BC%8C%E4%B8%8D%E4%BC%9A%E5%AD%98%E5%9C%A8%E5%86%85%E5%AD%98%E5%92%8CCPU%E7%9A%84%E9%97%AE%E9%A2%98%EF%BC%8C%0A%E6%8E%A5%E4%B8%8B%E6%9D%A5%E6%88%91%E4%BB%AC%E4%BE%9D%E6%AC%A1%E6%9D%A5%E5%88%86%E6%9E%90%E4%B8%80%E4%B8%8B%E7%9B%B8%E5%85%B3%E7%9A%84%E4%BB%A3%E7%A0%81%0A%23%23%23%23%201%E3%80%81SDwebImage%0A%60%60%60%0A%40property%20(nonatomic%2C%20strong)%20UIImageView%20%20*gifImageview%3B%0A%0Aself.gifImageview%20%3D%20%5B%5BSDAnimatedImageView%20alloc%5Dinit%5D%3B%0A%20%20%20%20%5Bself.view%20addSubview%3Aself.gifImageview%5D%3B%0A%5Bself.gifImageview%20mas_makeConstraints%3A%5E(MASConstraintMaker%20*make)%20%7B%0A%20%20%20%20%20%20%20%20make.left.right.mas_equalTo(self.view)%3B%0A%20%20%20%20%20%20%20%20make.centerY.mas_equalTo(self.view)%3B%0A%20%20%20%20%20%20%20%20make.height.equalTo(%40(200))%3B%0A%20%20%20%20%7D%5D%3B%0A%0A%20%2F%2F%C2%A0%E8%BF%99%E9%87%8C%E6%88%91%E4%BD%BF%E7%94%A8%E7%9A%84%E6%98%AF%E6%9C%AC%E5%9C%B0%E7%9A%84%E6%96%87%E4%BB%B6%EF%BC%8C%E6%9C%ACgif%20%E5%86%85%E5%AD%98%E6%98%AF1.3M%20%E5%8C%85%E5%90%AB60%E5%BC%A0%E5%9B%BE%E7%89%87%0ANSString%20*path%20%3D%20%5B%5BNSBundle%20mainBundle%5D%20pathForResource%3A%5BNSString%20stringWithFormat%3A%40%22%E8%BD%AC%E5%9C%BA_1%22%5D%20ofType%3A%40%22gif%22%5D%3B%0ANSData%20*data%20%3D%20%5BNSData%20dataWithContentsOfFile%3Apath%5D%3B%0AUIImage%20*image%20%3D%20%5BUIImage%20sd_imageWithGIFData%3Adata%5D%3B%20%20%20%20%5Bself.gifImageview%20setImage%3Aimage%5D%3B%0A%60%60%60%0A%E5%8A%A0%E8%BD%BD%E5%87%BA%E6%9D%A5%E9%80%9A%E8%BF%87Xcode%20%E6%9F%A5%E7%9C%8B%EF%BC%8C%E5%8F%91%E7%8E%B0Memory%20%E4%BC%9A%E5%BE%88%E9%AB%98%EF%BC%8C%E5%A6%82%E4%B8%8B%E5%9B%BE%EF%BC%8C%E8%BF%99%E4%B8%AA%E6%98%AF%E5%8D%95%E7%8B%AC%E4%B8%80%E4%B8%AAgif%EF%BC%8C%E6%88%91%E5%A6%82%E6%9E%9C%E5%8A%A0%E8%BD%BD3%E4%B8%AAgif%EF%BC%8CMemory%E4%BC%9A%E7%88%86%E5%A2%9E%E5%88%B02G%20%0A!%5B0fd0e512c15620b2854a6abbf96f91ae.png%5D(evernotecid%3A%2F%2FDACA3747-3198-4F0B-8E91-B67AC80F3E8E%2Fappyinxiangcom%2F13103255%2FENResource%2Fp4041)%0A1%E3%80%81%E6%88%91%E4%BB%AC%E9%80%9A%E8%BF%87sdwebImage%20%E7%9A%84%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B8%80%E4%B8%8B%E9%97%AE%E9%A2%98%E7%9A%84%E5%AD%98%E5%9C%A8%0A%60sd_imageWithGIFData%60%E6%98%AFSDwebImage%20%E7%9A%84%20UIImage%2BGIF%E4%B8%AD%E6%96%B9%E6%B3%95%EF%BC%8C%E9%87%8C%E9%9D%A2%E7%9B%B4%E6%8E%A5%E8%B0%83%E7%94%A8%20%60%5B%5BSDImageGIFCoder%20sharedCoder%5D%20decodedImageWithData%3Adata%20options%3A0%5D%3B%60%EF%BC%8C%E6%8E%A5%E4%B8%8B%E6%9D%A5%E6%88%91%E4%BB%AC%E7%9B%B4%E6%8E%A5%E7%9C%8B%E4%B8%80%E4%B8%8B%60decodedImageWithData%60%20%E7%9A%84%E6%BA%90%E7%A0%81%0A%0A%60%60%60%0A%23import%20%22SDImageIOAnimatedCoder.h%22%0A-%20(UIImage%20*)decodedImageWithData%3A(NSData%20*)data%20options%3A(nullable%20SDImageCoderOptions%20*)options%20%7B%0A%2F%2F%E5%AE%89%E5%85%A8%E5%88%A4%E6%96%AD%0A%20%20%20%20if%20(!data)%20%7B%0A%20%20%20%20%20%20%20%20return%20nil%3B%0A%20%20%20%20%7D%0A%20%20%20%20CGFloat%20scale%20%3D%201%3B%0A%20%20%20%20%2F%2Foption%20%E4%B8%BA%20nil%20%EF%BC%8Cscalefactor%20%20thumbnailSizeValue%20%E6%9A%82%E6%97%B6%E6%97%A0%E7%94%A8%0A%20%20%20%20NSNumber%20*scaleFactor%20%3D%20options%5BSDImageCoderDecodeScaleFactor%5D%3B%0A%20%20%20%20if%20(scaleFactor%20!%3D%20nil)%20%7B%0A%20%20%20%20%20%20%20%20scale%20%3D%20MAX(%5BscaleFactor%20doubleValue%5D%2C%201)%3B%0A%20%20%20%20%7D%0A%20%20%20%20%0A%20%20%20%20CGSize%20thumbnailSize%20%3D%20CGSizeZero%3B%0A%20%20%20%20%2F%2F%E8%A7%A3%E7%A0%81%E7%BC%A9%E7%95%A5%E5%9B%BE%E5%83%8F%E7%B4%A0%E5%A4%A7%E5%B0%8F%0A%20%20%20%20NSValue%20*thumbnailSizeValue%20%3D%20options%5BSDImageCoderDecodeThumbnailPixelSize%5D%3B%0A%20%20%20%20if%20(thumbnailSizeValue%20!%3D%20nil)%20%7B%0A%23if%20SD_MAC%0A%20%20%20%20%20%20%20%20thumbnailSize%20%3D%20thumbnailSizeValue.sizeValue%3B%0A%23else%0A%20%20%20%20%20%20%20%20thumbnailSize%20%3D%20thumbnailSizeValue.CGSizeValue%3B%0A%23endif%0A%20%20%20%20%7D%0A%20%20%20%20%0A%20%20%20%20BOOL%20preserveAspectRatio%20%3D%20YES%3B%0A%20%20%20%20NSNumber%20*preserveAspectRatioValue%20%3D%20options%5BSDImageCoderDecodePreserveAspectRatio%5D%3B%0A%20%20%20%20if%20(preserveAspectRatioValue%20!%3D%20nil)%20%7B%0A%20%20%20%20%20%20%20%20preserveAspectRatio%20%3D%20preserveAspectRatioValue.boolValue%3B%0A%20%20%20%20%7D%0A%20%20%20%20%0A%23if%20SD_MAC%0A%20%20%20%20%2F%2F%20If%20don't%20use%20thumbnail%2C%20prefers%20the%20built-in%20generation%20of%20frames%20(GIF%2FAPNG)%0A%20%20%20%20%2F%2F%20Which%20decode%20frames%20in%20time%20and%20reduce%20memory%20usage%0A%20%20%20%20if%20(thumbnailSize.width%20%3D%3D%200%20%7C%7C%20thumbnailSize.height%20%3D%3D%200)%20%7B%0A%20%20%20%20%20%20%20%20SDAnimatedImageRep%20*imageRep%20%3D%20%5B%5BSDAnimatedImageRep%20alloc%5D%20initWithData%3Adata%5D%3B%0A%20%20%20%20%20%20%20%20NSSize%20size%20%3D%20NSMakeSize(imageRep.pixelsWide%20%2F%20scale%2C%20imageRep.pixelsHigh%20%2F%20scale)%3B%0A%20%20%20%20%20%20%20%20imageRep.size%20%3D%20size%3B%0A%20%20%20%20%20%20%20%20NSImage%20*animatedImage%20%3D%20%5B%5BNSImage%20alloc%5D%20initWithSize%3Asize%5D%3B%0A%20%20%20%20%20%20%20%20%5BanimatedImage%20addRepresentation%3AimageRep%5D%3B%0A%20%20%20%20%20%20%20%20return%20animatedImage%3B%0A%20%20%20%20%7D%0A%23endif%0A%20%20%20%20%2F%2F%E4%BA%8C%E8%BF%9B%E5%88%B6%E7%B1%BB%E5%9E%8B%E7%9A%84%E8%BD%AC%E6%8D%A2%0A%20%20%20%20%2F%2FCGImageSourceRef%E6%98%AF%E4%B8%AA%E4%BB%80%E4%B9%88%E5%91%A2%3F%20%E6%88%91%E4%BB%AC%E5%8F%AF%E4%BB%A5%E7%9C%8B%E5%88%B0%E8%BF%99%E6%98%AF%E4%B8%80%E4%B8%AAtypedef%20CGImageSource%20*%20CGImageSourceRef%3B%0A%20%20%20%20%2F%2F%E8%BF%99%E6%98%AF%E4%B8%80%E4%B8%AA%E6%8C%87%E9%92%88%2CCGImageSource%E6%98%AF%E5%AF%B9%E5%9B%BE%E5%83%8F%E6%95%B0%E6%8D%AE%E8%AF%BB%E5%8F%96%E4%BB%BB%E5%8A%A1%E7%9A%84%E6%8A%BD%E8%B1%A1%EF%BC%8C%E9%80%9A%E8%BF%87%E5%AE%83%E5%8F%AF%E4%BB%A5%E8%8E%B7%E5%BE%97%E5%9B%BE%E5%83%8F%E5%AF%B9%E8%B1%A1%E3%80%81%E7%BC%A9%E7%95%A5%E5%9B%BE%E3%80%81%E5%9B%BE%E5%83%8F%E7%9A%84%E5%B1%9E%E6%80%A7(%E5%8C%85%E6%8B%ACExif%E4%BF%A1%E6%81%AF)%E3%80%82%0A%20%20%20%20CGImageSourceRef%20source%20%3D%20CGImageSourceCreateWithData((__bridge%20CFDataRef)data%2C%20NULL)%3B%0A%20%20%20%20if%20(!source)%20%7B%0A%20%20%20%20%20%20%20%20return%20nil%3B%0A%20%20%20%20%7D%0A%20%20%20%20%2F%2F%E8%8E%B7%E5%8F%96%E6%9C%89%E5%87%A0%E5%BC%A0%E5%9B%BE%E7%89%87%0A%20%20%20%20size_t%20count%20%3D%20CGImageSourceGetCount(source)%3B%0A%20%20%20%20%2F%2F%E8%BF%94%E5%9B%9E%E7%9A%84%E5%8A%A8%E6%80%81%E5%9B%BE%E7%89%87%0A%20%20%20%20UIImage%20*animatedImage%3B%0A%20%20%20%20%0A%20%20%20%20BOOL%20decodeFirstFrame%20%3D%20%5Boptions%5BSDImageCoderDecodeFirstFrameOnly%5D%20boolValue%5D%3B%0A%20%20%20%20if%20(decodeFirstFrame%20%7C%7C%20count%20%3C%3D%201)%20%7B%0A%20%20%20%20%20%20%20%20animatedImage%20%3D%20%5Bself.class%20createFrameAtIndex%3A0%20source%3Asource%20scale%3Ascale%20preserveAspectRatio%3ApreserveAspectRatio%20thumbnailSize%3AthumbnailSize%20options%3Anil%5D%3B%0A%20%20%20%20%7D%20else%20%7B%0A%20%20%20%20%2F%2F%E9%9B%86%E5%90%88%20%E5%AD%98%E6%94%BE%E5%8D%95%E5%BC%A0%E7%9A%84%E5%9B%BE%E7%89%87%0A%20%20%20%20%20%20%20%20NSMutableArray%3CSDImageFrame%20*%3E%20*frames%20%3D%20%5BNSMutableArray%20array%5D%3B%0A%20%20%20%20%20%20%20%20%0A%20%20%20%20%20%20%20%20for%20(size_t%20i%20%3D%200%3B%20i%20%3C%20count%3B%20i%2B%2B)%20%7B%0A%2F%2F%20%20%20%20%20%20%20%20%20%20%20%20%E8%8E%B7%E5%8F%96gif%E6%AF%8F%E4%B8%80%E5%B8%A7%E5%9B%BE%E5%83%8F%0A%20%20%20%20%20%20%20%20%20%20%20%20UIImage%20*image%20%3D%20%5Bself.class%20createFrameAtIndex%3Ai%20source%3Asource%20scale%3Ascale%20preserveAspectRatio%3ApreserveAspectRatio%20thumbnailSize%3AthumbnailSize%20options%3Anil%5D%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20if%20(!image)%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20continue%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%20%20%20%20%2F%2F%20%E8%8E%B7%E5%8F%96%E6%AF%8F%E4%B8%80%E5%B8%A7%E5%9B%BE%E5%83%8F%E5%AF%B9%E5%BA%94%E7%9A%84%E6%98%BE%E7%A4%BA%E6%97%B6%E9%97%B4%0A%20%20%20%20%20%20%20%20%20%20%20%20NSTimeInterval%20duration%20%3D%20%5Bself.class%20frameDurationAtIndex%3Ai%20source%3Asource%5D%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%2F%2F%E5%88%9B%E5%BB%BA%E5%8A%A8%E5%9B%BE%0A%20%20%20%20%20%20%20%20%20%20%20%20SDImageFrame%20*frame%20%3D%20%5BSDImageFrame%20frameWithImage%3Aimage%20duration%3Aduration%5D%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%5Bframes%20addObject%3Aframe%5D%3B%0A%2F%2F%20%20%20%20%20%20%20%20%20%20%20%20%E4%BD%9C%E8%80%85%E8%8E%B7%E5%8F%96%E6%AF%8F%E4%B8%80%E5%B8%A7%E5%9B%BE%E5%83%8F%E7%9A%84%E6%98%BE%E7%A4%BA%E6%97%B6%E9%97%B4%E7%9A%84%E7%9B%AE%E7%9A%84%E4%BB%85%E4%BB%85%E6%98%AF%E4%B8%BA%E4%BA%86%E8%AE%A1%E7%AE%97gif%E5%8A%A8%E7%94%BB%E7%9A%84%E6%80%BB%E6%97%B6%E9%95%BF%EF%BC%8C%E5%B9%B6%E6%B2%A1%E6%9C%89%E7%BB%99%E6%AF%8F%E4%B8%80%E5%B8%A7%E5%9B%BE%E5%83%8F%E7%9A%84%E6%98%BE%E7%A4%BA%E6%97%B6%E9%97%B4%E5%88%86%E9%85%8D%E7%9B%B8%E5%BA%94%E7%9A%84%E6%9D%83%E9%87%8D%EF%BC%8C%E5%AF%BC%E8%87%B4%E6%AF%8F%E4%B8%80%E5%B8%A7%E5%9B%BE%E5%83%8F%E6%98%BE%E7%A4%BA%E7%9A%84%E6%97%B6%E9%97%B4%E4%B8%BA%E5%B9%B3%E5%9D%87%E6%97%B6%E9%97%B4%0A%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%0A%20%20%20%20%20%20%20%20NSUInteger%20loopCount%20%3D%20%5Bself.class%20imageLoopCountWithSource%3Asource%5D%3B%0A%20%20%20%20%20%20%20%20NSLog(%40%22%25lu%22%2C(unsigned%20long)loopCount)%3B%0A%20%20%20%20%20%20%20%20%2F%2F%E6%8A%8A%E9%9D%99%E6%80%81%E7%9A%84%E5%9B%BE%E7%89%87%E8%BD%AC%E6%8D%A2%E4%B8%BA%E5%8A%A8%E6%80%81%E7%9A%84image%2C%E6%89%80%E4%BB%A5%E4%BC%9A%E6%9C%89%E5%A4%A7%E9%87%8F%E5%8D%95%E5%BC%A0%E7%9A%84%E5%9B%BE%E7%89%87%E5%AD%98%E6%94%BE%E5%9C%A8%E5%86%85%E5%AD%98%E4%B8%AD%0A%20%20%20%20%20%20%20%20animatedImage%20%3D%20%5BSDImageCoderHelper%20animatedImageWithFrames%3Aframes%5D%3B%0A%20%20%20%20%20%20%20%20animatedImage.sd_imageLoopCount%20%3D%20loopCount%3B%0A%20%20%20%20%7D%0A%20%20%20%20animatedImage.sd_imageFormat%20%3D%20self.class.imageFormat%3B%0A%20%20%20%20%2F%2F%E9%87%8A%E6%94%BE%E5%9B%BE%E5%83%8F%E6%95%B0%E6%8D%AE%E8%AF%BB%E5%8F%96%E4%BB%BB%E5%8A%A1%E7%9A%84%E6%8A%BD%E8%B1%A1%E5%AF%B9%E8%B1%A1%0A%20%20%20%20CFRelease(source)%3B%0A%20%20%20%20%0A%20%20%20%20return%20animatedImage%3B%0A%7D%0A%60%60%60%0A%E5%8F%91%E7%8E%B0SDWebImage%E5%A4%84%E7%90%86gif%E5%9B%BE%E7%89%87%E7%9A%84%E6%96%B9%E6%B3%95%E6%98%AF%EF%BC%9A%E5%B0%86gif%E8%B5%84%E6%BA%90%E4%B8%AD%E6%AF%8F%E4%B8%80%E5%BC%A0imgae%E5%86%99%E5%85%A5%E5%88%B0%E5%86%85%E5%AD%98%E4%B8%AD%EF%BC%8C%E9%80%9A%E8%BF%87animatedImageWithImages%E7%9A%84%E6%96%B9%E5%BC%8F%E6%92%AD%E6%94%BE%E5%8A%A8%E7%94%BB%E3%80%82%E8%BF%99%E6%A0%B7%E7%9A%84%E5%A5%BD%E5%A4%84%E6%98%AF%EF%BC%8Cgif%E8%BD%AE%E8%AF%A2%E6%92%AD%E6%94%BE%E6%97%B6%EF%BC%8C%E7%9B%B4%E6%8E%A5%E4%BB%8E%E5%86%85%E5%AD%98%E4%B8%AD%E5%8F%96%E8%B5%84%E6%BA%90%E5%B0%B1%E5%A5%BD%E4%BA%86%EF%BC%8C%E9%99%8D%E4%BD%8E%E4%BA%86cpu%E7%9A%84%E5%8D%A0%E7%94%A8%E3%80%82%E4%B9%9F%E5%B0%B1%E6%98%AF%E8%AF%B4%EF%BC%8CSDWebImage%E6%98%AF%E4%BB%A5%E7%A9%BA%E9%97%B4%E6%8D%A2%E5%8F%96%E7%9A%84%E6%B5%81%E7%95%85%E5%BA%A6%E3%80%82%0A%0A%0A%23%23%23%23%202%20YYKIt%0A%E6%88%91%E4%BB%AC%E6%9D%A5%E5%88%9B%E5%BB%BA%20imageView%20%EF%BC%8C%E5%B1%95%E7%A4%BA%E6%88%91%E4%BB%AC%E7%9A%84%E5%86%85%E5%AE%B9%0A%60%60%60%0A%40property%20(nonatomic%2Cstrong)%20YYAnimatedImageView%20*YYImageView%3B%0A%0Aself.YYImageView%20%3D%20%5B%5BYYAnimatedImageView%20alloc%5Dinit%5D%3B%0A%5Bself.view%20addSubview%3Aself.YYImageView%5D%3B%0A%0A%5Bself.YYImageView%20mas_makeConstraints%3A%5E(MASConstraintMaker%20*make)%20%7B%0A%20%20%20%20%20make.left.right.mas_equalTo(self.view)%3B%0A%20%20%20%20%20make.centerY.mas_equalTo(self.view)%3B%0A%20%20%20%20%20make.height.equalTo(%40(200))%3B%0A%20%7D%5D%3B%0A%20%0A%20YYImage%20*yyimage%20%3D%20%5BYYImage%20imageNamed%3A%40%22%E8%BD%AC%E5%9C%BA_1%22%5D%3B%0A%20%5Bself.YYImageView%20setImage%3Ayyimage%5D%3B%0A%60%60%60%0AYYkit%20%E5%8A%A0%E8%BD%BDgif%20%E7%9A%84%E8%BF%87%E7%A8%8B%E4%B8%AD%EF%BC%8Cmemory%20%E5%9F%BA%E6%9C%AC%E4%B8%8D%E4%BC%9A%E8%BF%87%E5%BA%A6%E4%BD%BF%E7%94%A8%EF%BC%8C%E4%BD%86%E6%98%AF%E6%9C%80%E5%88%9D%E4%BC%9A%E6%9C%89%E4%B8%80%E6%AE%B5%E6%97%B6%E9%97%B4CPU%E7%9A%84%E4%BD%BF%E7%94%A8%E7%8E%87%E4%BC%9A%E5%BE%88%E9%AB%98%E8%BE%BE%E5%88%B0%2098%20%25%EF%BC%8C%0A!%5B7523b3fc79de23535e1129f4f2934528.png%5D(evernotecid%3A%2F%2FDACA3747-3198-4F0B-8E91-B67AC80F3E8E%2Fappyinxiangcom%2F13103255%2FENResource%2Fp4043)%0A%0A%60%60%60%0A%0A%20%20%20%20if%20(!_finalized%20%26%26%20index%20%3E%200)%20return%20NULL%3B%0A%20%20%20%20if%20(_frames.count%20%3C%3D%20index)%20return%20NULL%3B%0A%20%20%20%20_YYImageDecoderFrame%20*frame%20%3D%20_frames%5Bindex%5D%3B%0A%20%20%20%20%0A%20%20%20%20if%20(_source)%20%7B%0A%20%20%20%20%20%20%20%20CGImageRef%20imageRef%20%3D%20CGImageSourceCreateImageAtIndex(_source%2C%20index%2C%20(CFDictionaryRef)%40%7B(id)kCGImageSourceShouldCache%3A%40(YES)%7D)%3B%0A%20%20%20%20%20%20%20%20if%20(imageRef%20%26%26%20extendToCanvas)%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20size_t%20width%20%3D%20CGImageGetWidth(imageRef)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20size_t%20height%20%3D%20CGImageGetHeight(imageRef)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20if%20(width%20%3D%3D%20_width%20%26%26%20height%20%3D%3D%20_height)%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%2F%2F%20%E6%AF%8F%E6%AC%A1%E7%9A%84%E5%B1%95%E7%A4%BA%E9%83%BD%E4%BC%9A%E8%B0%83%E7%94%A8create%20%E6%96%B9%E6%B3%95%20%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CGImageRef%20imageRefExtended%20%3D%20YYCGImageCreateDecodedCopy(imageRef%2C%20YES)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20if%20(imageRefExtended)%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CFRelease(imageRef)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20imageRef%20%3D%20imageRefExtended%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20if%20(decoded)%20*decoded%20%3D%20YES%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%20%20%20%20%7D%20else%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CGContextRef%20context%20%3D%20CGBitmapContextCreate(NULL%2C%20_width%2C%20_height%2C%208%2C%200%2C%20YYCGColorSpaceGetDeviceRGB()%2C%20kCGBitmapByteOrder32Host%20%7C%20kCGImageAlphaPremultipliedFirst)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20if%20(context)%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CGContextDrawImage(context%2C%20CGRectMake(0%2C%20_height%20-%20height%2C%20width%2C%20height)%2C%20imageRef)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CGImageRef%20imageRefExtended%20%3D%20CGBitmapContextCreateImage(context)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CFRelease(context)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20if%20(imageRefExtended)%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20CFRelease(imageRef)%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20imageRef%20%3D%20imageRefExtended%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20if%20(decoded)%20*decoded%20%3D%20YES%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20return%20imageRef%3B%0A%20%20%20%20%7D%0A%20%20%20%20%0A%60%60%60%0A%0A%E5%8F%91%E7%8E%B0%E4%BA%86YYKit%E5%A4%84%E7%90%86gif%E5%9B%BE%E7%89%87%E7%9A%84%E6%96%B9%E6%B3%95%E6%98%AF%EF%BC%9A%E6%AF%8F%E6%AC%A1%E4%BB%8E%E7%BC%93%E5%AD%98%E7%9A%84gif%E4%B8%AD%EF%BC%8C%E8%AF%BB%E5%8F%96%E5%BD%93%E5%89%8D%E9%9C%80%E8%A6%81%E5%B1%95%E7%A4%BA%E7%9A%84image%EF%BC%8C%E8%BF%9B%E8%A1%8C%E5%8A%A8%E7%94%BB%E5%B1%95%E7%A4%BA%E3%80%82%E8%BF%99%E6%A0%B7%E5%81%9A%E7%9A%84%E5%A5%BD%E5%A4%84%E6%98%AF%EF%BC%8C%E4%B8%8D%E7%94%A8%E4%B8%BAgif%E7%9A%84%E6%AF%8F%E5%BC%A0image%E5%BC%80%E8%BE%9F%E7%A9%BA%E9%97%B4%E4%BA%86%EF%BC%8C%E6%AF%8F%E6%AC%A1%E9%83%BD%E6%98%AF%E4%BB%8E%E4%B8%80%E4%BB%BDgif%E8%B5%84%E6%BA%90%E4%B8%AD%E8%AF%BB%E5%8F%96%E4%B8%80%E5%BC%A0image%E5%B0%B1%E5%A5%BD%E4%BA%86%E3%80%82%E4%BB%A5%E4%B8%80%E5%AE%9A%E7%9A%84%E5%B8%A7%E7%8E%87%E4%BB%8E%E7%BC%93%E5%86%B2%E4%B8%AD%E8%A7%A3%E6%9E%90%E5%87%BA%E5%BD%93%E5%89%8D%E9%9C%80%E8%A6%81%E5%B1%95%E7%A4%BA%E7%9A%84image%EF%BC%8C%E8%82%AF%E5%AE%9A%E6%98%AF%E9%9C%80%E8%A6%81%E8%80%97%E7%94%A8cpu%E7%9A%84%E3%80%82%0A%0A%23%23%23%23%203%E3%80%81lottie%0A%E6%88%91%E4%BB%AC%E5%85%88%E6%9D%A5%E5%88%9B%E5%BB%BA%E4%B8%80%E4%B8%AAlottie%EF%BC%8Clottie%20%E5%8A%A0%E8%BD%BDgif%20%E5%8A%A8%E7%94%BB%E9%9C%80%E8%A6%81%E6%8A%8A%E5%8A%A8%E7%94%BB%E8%BD%AC%E6%8D%A2%E6%88%90json%E6%95%B0%E6%8D%AE%EF%BC%8C%0A%60%60%60%0A%40property%20(nonatomic%2C%20strong)%20LOTAnimationView%20%20*loImageView%3B%0A%0Aself.loImageView%20%3D%20%5BLOTAnimationView%20animationNamed%3A%40%221%22%5D%3B%0A%5Bself.loImageView%20play%5D%3B%0Aself.loImageView.loopAnimation%20%3D%20YES%3B%0A%5Bself.view%20addSubview%3Aself.loImageView%5D%3B%0A%5Bself.loImageView%20mas_makeConstraints%3A%5E(MASConstraintMaker%20*make)%20%7B%0A%20%20%20%20%20make.left.right.mas_equalTo(self.view)%3B%0A%20%20%20%20%20make.centerY.mas_equalTo(self.view)%3B%0A%20%20%20%20%20make.height.equalTo(%40(200))%3B%0A%7D%5D%3B%0A%0A%20self.loImageView2%20%3D%20%5BLOTAnimationView%20animationNamed%3A%40%222%22%5D%3B%0A%20%5Bself.loImageView2%20play%5D%3B%0A%20%5Bself.view%20addSubview%3Aself.loImageView2%5D%3B%0A%60%60%60%0A%E9%80%9A%E8%BF%87lottie%20%E5%8A%A0%E8%BD%BD%E5%90%8C%E6%A0%B7%E7%9A%84gif%E5%8A%A8%E7%94%BB%E7%9C%8B%E5%88%B0%E7%9A%84CPU%20%E5%92%8Cmemory%20%E7%9A%84%E6%95%B0%E6%8D%AE%0A!%5B5a9610a3bf84ea44dba1c36592acf847.png%5D(evernotecid%3A%2F%2FDACA3747-3198-4F0B-8E91-B67AC80F3E8E%2Fappyinxiangcom%2F13103255%2FENResource%2Fp4044)%0A%0A%23%23%23%23%23%203-1%20%E6%8E%A5%E4%B8%8B%E6%9D%A5%E6%88%91%E4%BB%AC%E7%9C%8B%E4%B8%80%E4%B8%8Blottie%20%E7%9A%84%E5%8E%9F%E7%90%86%EF%BC%8C%E5%85%B7%E4%BD%93%E4%BD%BF%E7%94%A8%E6%96%B9%E6%B3%95%E8%AF%B7%E5%8F%82%E8%80%83%EF%BC%88%EF%BC%89%5BiOS%20Lottie%E5%8A%A8%E7%94%BB%E6%8E%A5%E5%85%A5%E8%BF%87%E7%A8%8B%E8%AF%A6%E8%A7%A3%5D(https%3A%2F%2Fjuejin.im%2Fpost%2F6844903576272125966)%0A%0A1%E3%80%81Lottie%E6%98%AFAirbnb%E5%BC%80%E6%BA%90%E7%9A%84%E4%B8%80%E4%B8%AA%E5%8A%A8%E7%94%BB%E6%B8%B2%E6%9F%93%E5%BA%93%EF%BC%8C%E6%94%AF%E6%8C%81%E5%A4%9A%E5%B9%B3%E5%8F%B0%EF%BC%8C%E5%8C%85%E6%8B%ACiOS%E3%80%81Android%E3%80%81React%20Native%E4%BB%A5%E5%8F%8AFlutter%EF%BC%88https%3A%2F%2Fgithub.com%2Fairbnb%2Flottie-ios%EF%BC%89%E3%80%82%E9%99%A4%E4%BA%86%E5%AE%98%E6%96%B9%E6%94%AF%E6%8C%81%E7%9A%84%E5%B9%B3%E5%8F%B0%EF%BC%8C%E6%9B%B4%E6%9C%89%E5%A4%A7%E7%A5%9E%E5%AE%9E%E7%8E%B0%E4%BA%86%E6%94%AF%E6%8C%81Windows%E3%80%81Qt%E3%80%81Skia%E4%BB%A5%E5%8F%8AReact%E3%80%81Vue%E3%80%81Angular%E7%AD%89%E5%B9%B3%E5%8F%B0%0ALottie%E5%8A%A8%E7%94%BB%E4%BA%A7%E7%94%9F%E7%9A%84%E6%B5%81%E7%A8%8B%E5%A6%82%E4%B8%8B%EF%BC%9A%0A!%5B1c922e14e73667bf43b034358151c61f.png%5D(evernotecid%3A%2F%2FDACA3747-3198-4F0B-8E91-B67AC80F3E8E%2Fappyinxiangcom%2F13103255%2FENResource%2Fp4045)%0A%0A%E6%B3%A8%E6%84%8F%E7%82%B9%EF%BC%9ALottie%203.0%E4%B9%8B%E5%90%8E%E5%B7%B2%E7%BB%8F%E5%85%A8%E9%83%A8%E4%BD%BF%E7%94%A8swift%E5%AE%9E%E7%8E%B0%EF%BC%8C%E6%89%80%E4%BB%A5%E5%A6%82%E6%9E%9C%E9%9C%80%E8%A6%81%E4%BD%BF%E7%94%A8Objective-C%E7%89%88%E6%9C%AC%E9%9C%80%E8%A6%81%E4%BD%BF%E7%94%A8Lottie%202.5.3%E7%89%88%E6%9C%AC%0A%0A%23%23%23%23%23%203-2%20Lottie%20%E5%8E%9F%E7%90%86%0A1%E3%80%81%E9%9C%80%E8%A6%81%E6%88%91%E4%BB%AC%E7%9A%84%E8%AE%BE%E8%AE%A1%E6%8A%8Agif%20%E5%8A%A8%E7%94%BB%E4%B8%93%E7%A8%8Bjson%0A%E4%BE%8B%E5%A6%82%EF%BC%9A%0A!%5Be3434fe76235eb5ada4187b2ed26dc32.png%5D(evernotecid%3A%2F%2FDACA3747-3198-4F0B-8E91-B67AC80F3E8E%2Fappyinxiangcom%2F13103255%2FENResource%2Fp4047)%0ALottie%E6%95%B4%E4%BD%93%E7%9A%84%E5%8E%9F%E7%90%86%E5%A6%82%E4%B8%8B%EF%BC%9A%0A%60%60%60%0A1%EF%BC%89%E9%A6%96%E5%85%88%E8%A6%81%E7%9F%A5%E9%81%93%EF%BC%8C%E4%B8%80%E4%B8%AA%E5%AE%8C%E6%95%B4%E5%8A%A8%E7%94%BBView%EF%BC%8C%E6%98%AF%E7%94%B1%E5%BE%88%E5%A4%9A%E4%B8%AA%E5%AD%90Layer%20%E7%BB%84%E6%88%90%EF%BC%8C%E8%80%8C%E6%AF%8F%E4%B8%AA%E5%AD%90Layer%E4%B8%BB%E8%A6%81%E9%80%9A%E8%BF%87shapes%EF%BC%88%E5%BD%A2%E7%8A%B6%EF%BC%89%EF%BC%8Cmasks%EF%BC%88%E8%92%99%E7%89%88%EF%BC%89%EF%BC%8Ctransform%E4%B8%89%E5%A4%A7%E9%83%A8%E5%88%86%E8%BF%9B%E8%A1%8C%E5%8A%A8%E7%94%BB%E3%80%82%0A2%EF%BC%89Lottie%E6%A1%86%E6%9E%B6%E9%80%9A%E8%BF%87%E8%AF%BB%E5%8F%96JSON%E6%96%87%E4%BB%B6%EF%BC%8C%E8%8E%B7%E5%8F%96%E5%88%B0%E6%AF%8F%E4%B8%AA%E5%AD%90Layer%20%E7%9A%84shapes%EF%BC%8Cmasks%EF%BC%8C%E4%BB%A5%E5%8F%8A%E5%87%BA%E7%8E%B0%E6%97%B6%E9%97%B4%EF%BC%8C%E6%B6%88%E5%A4%B1%E6%97%B6%E9%97%B4%E4%BB%A5%E5%8F%8ATransform%E5%90%84%E4%B8%AA%E5%B1%9E%E6%80%A7%E7%9A%84%E5%85%B3%E9%94%AE%E5%B8%A7%E6%95%B0%E7%BB%84%E3%80%82%0A3%EF%BC%89%E5%8A%A8%E7%94%BB%E5%88%99%E6%98%AF%E9%80%9A%E8%BF%87%E7%BB%99CompositionLayer%20%EF%BC%88%E6%89%80%E6%9C%89%E7%9A%84%E5%AD%90layer%E9%83%BD%E6%B7%BB%E5%8A%A0%E5%9C%A8%E8%BF%99%E4%B8%AALayer%20%E4%B8%8A%EF%BC%89%E7%9A%84%20currentFrame%E5%B1%9E%E6%80%A7%E6%B7%BB%E5%8A%A0%E4%B8%80%E4%B8%AACABaseAnimation%20%E6%9D%A5%E5%AE%9E%E7%8E%B0%E3%80%82%0A4%EF%BC%89%E6%89%80%E6%9C%89%E7%9A%84%E5%AD%90Layer%E6%A0%B9%E6%8D%AEcurrentFrame%20%E5%B1%9E%E6%80%A7%E7%9A%84%E5%8F%98%E5%8C%96%EF%BC%8C%E6%A0%B9%E6%8D%AEJSON%E4%B8%AD%E7%9A%84%E5%85%B3%E9%94%AE%E5%B8%A7%E6%95%B0%E7%BB%84%E8%AE%A1%E7%AE%97%E5%87%BA%E8%87%AA%E5%B7%B1%E7%9A%84%E5%BD%93%E5%89%8D%E7%8A%B6%E6%80%81%E5%B9%B6%E8%BF%9B%E8%A1%8C%E6%98%BE%E7%A4%BA%E3%80%82%0A%60%60%60%0A%0A%E6%8E%A5%E4%B8%8B%E6%9D%A5%E8%AE%A9%E6%88%91%E4%BB%AC%E6%B7%B1%E5%85%A5%E5%AE%83%E7%9A%84%E6%BA%90%E7%A0%81%EF%BC%88OC%E7%89%88%E6%9C%AC%EF%BC%89%E5%8E%BB%E7%9C%8B%E7%9C%8B%EF%BC%8C%E5%AF%B9%E5%AE%83%E7%9A%84%E5%8E%9F%E7%90%86%E6%9C%89%E4%B8%80%E4%B8%AA%E6%9B%B4%E6%B7%B1%E5%88%BB%E7%9A%84%E8%AE%A4%E8%AF%86%0A%0A1%EF%BC%89%E5%85%A5%E5%8F%A3%E7%B1%BB%E4%B8%BALOTAnimationView%EF%BC%8C%E6%8F%90%E4%BE%9B%E4%BA%86%E4%B8%80%E7%B3%BB%E5%88%97%E5%8A%A0%E8%BD%BD%E5%92%8C%E8%AE%BE%E7%BD%AE%E5%8A%A8%E7%94%BB%E7%9A%84%E6%96%B9%E6%B3%95%E5%8F%8A%E5%B1%9E%E6%80%A7%E4%BB%A5%E5%8F%8A%E5%AF%B9%E5%8A%A8%E7%94%BB%E7%9A%84%E6%93%8D%E4%BD%9C%EF%BC%8C%E8%BF%99%E9%87%8C%E5%88%97%E4%B8%BE%E4%B8%80%E4%BA%8C%0A%60%60%60%0A%2B%20(nonnull%20instancetype)animationNamed%3A(nonnull%20NSString%20*)animationName%20NS_SWIFT_NAME(init(name%3A))%3B%0A%2B%20(nonnull%20instancetype)animationFromJSON%3A(nonnull%20NSDictionary%20*)animationJSON%20NS_SWIFT_NAME(init(json%3A))%3B%0A%2B%20(nonnull%20instancetype)animationFromJSON%3A(nullable%20NSDictionary%20*)animationJSON%20%0AinBundle%3A(nullable%20NSBundle%20*)bundle%20NS_SWIFT_NAME(init(json%3Abundle%3A))%3B%0A...%0A%40property%20(nonatomic%2C%20assign)%20CGFloat%20animationProgress%3B%0A%40property%20(nonatomic%2C%20assign)%20CGFloat%20animationSpeed%3B%0A...%0A-%20(void)play%3B%0A-%20(void)pause%3B%20%0A%60%60%60%0A%0ALOTAnimationView%E6%89%80%E6%9C%89%E7%9A%84%E5%8A%A0%E8%BD%BD%E6%96%B9%E6%B3%95%EF%BC%8C%E6%9C%80%E7%BB%88%E6%89%A7%E8%A1%8C%E7%9A%84%E9%83%BD%E6%98%AF%E6%8A%8AJSON%E5%AD%97%E5%85%B8%E4%BC%A0%E5%88%B0LOTComposition%E7%B1%BB%E4%B8%AD%EF%BC%8C%E7%BB%84%E8%A3%85LOTComposition%E5%AF%B9%E8%B1%A1%EF%BC%8C%E5%BD%93%E7%84%B6%E8%BF%98%E4%BC%9A%E6%9C%89%E4%B8%80%E4%BA%9B%E7%BC%93%E5%AD%98%E8%8E%B7%E5%8F%96%EF%BC%8C%E5%80%BC%E5%88%A4%E6%96%AD%E7%AD%89%E7%9A%84%E9%80%BB%E8%BE%91%EF%BC%8C%E4%BD%86%E6%98%AF%E6%A0%B8%E5%BF%83%E5%B0%B1%E6%98%AF%E4%BA%A7%E7%94%9F%E4%B8%80%E4%B8%AALOTComposition%E5%AF%B9%E8%B1%A1%EF%BC%9A%0A%60%60%60%0A%2B%20(nullable%20instancetype)animationNamed%3A(nonnull%20NSString%20*)animationName%20inBundle%3A(nonnull%20NSBundle%20*)bundle%20%7B%0A%20%20...%0A%20%20if%20(JSONObject%20%26%26%20!error)%20%7B%0A%20%20%20%20LOTComposition%20*laScene%20%3D%20%5B%5Bself%20alloc%5D%20initWithJSON%3AJSONObject%20withAssetBundle%3Abundle%5D%3B%0A%20%20%20%20%5B%5BLOTAnimationCache%20sharedCache%5D%20addAnimation%3AlaScene%20forKey%3AanimationName%5D%3B%0A%20%20%20%20laScene.cacheKey%20%3D%20animationName%3B%0A%20%20%20%20return%20laScene%3B%0A%20%20%7D%0A%20%20NSLog(%40%22%25s%3A%20Animation%20Not%20Found%22%2C%20__PRETTY_FUNCTION__)%3B%0A%20%20return%20nil%3B%0A%7D%0A%60%60%60%0A%0A2%EF%BC%89LOTComposition%E7%B1%BB%E7%94%A8%E6%9D%A5%E8%A7%A3%E6%9E%90%E6%95%B4%E4%B8%AA%E5%8A%A8%E7%94%BB%E7%9A%84json%E5%AD%97%E5%85%B8%EF%BC%8C%E8%8E%B7%E5%8F%96%E6%95%B4%E4%B8%AA%E5%8A%A8%E7%94%BB%E6%89%80%E9%9C%80%E7%9A%84%E6%95%B0%E6%8D%AE%E3%80%82%0A%60%60%60%0A-%20(void)_mapFromJSON%3A(NSDictionary%20*)jsonDictionary%0A%20%20%20%20%20withAssetBundle%3A(NSBundle%20*)bundle%20%7B%0A%20%20NSNumber%20*width%20%3D%20jsonDictionary%5B%40%22w%22%5D%3B%0A%20%20NSNumber%20*height%20%3D%20jsonDictionary%5B%40%22h%22%5D%3B%0A%20%20if%20(width%20%26%26%20height)%20%7B%0A%20%20%20%20CGRect%20bounds%20%3D%20CGRectMake(0%2C%200%2C%20width.floatValue%2C%20height.floatValue)%3B%0A%20%20%20%20_compBounds%20%3D%20bounds%3B%0A%20%20%7D%0A%20%20%0A%20%20_startFrame%20%3D%20%5BjsonDictionary%5B%40%22ip%22%5D%20copy%5D%3B%0A%20%20_endFrame%20%3D%20%5BjsonDictionary%5B%40%22op%22%5D%20copy%5D%3B%0A%20%20_framerate%20%3D%20%5BjsonDictionary%5B%40%22fr%22%5D%20copy%5D%3B%0A%20%20%0A%20%20if%20(_startFrame%20%26%26%20_endFrame%20%26%26%20_framerate)%20%7B%0A%20%20%20%20NSInteger%20frameDuration%20%3D%20(_endFrame.integerValue%20-%20_startFrame.integerValue)%20-%201%3B%0A%20%20%20%20NSTimeInterval%20timeDuration%20%3D%20frameDuration%20%2F%20_framerate.floatValue%3B%0A%20%20%20%20_timeDuration%20%3D%20timeDuration%3B%0A%20%20%7D%0A%20%20%0A%20%20NSArray%20*assetArray%20%3D%20jsonDictionary%5B%40%22assets%22%5D%3B%0A%20%20if%20(assetArray.count)%20%7B%0A%20%20%20%20_assetGroup%20%3D%20%5B%5BLOTAssetGroup%20alloc%5D%20initWithJSON%3AassetArray%20withAssetBundle%3Abundle%20withFramerate%3A_framerate%5D%3B%0A%20%20%7D%0A%20%20%0A%20%20NSArray%20*layersJSON%20%3D%20jsonDictionary%5B%40%22layers%22%5D%3B%0A%20%20if%20(layersJSON)%20%7B%0A%20%20%20%20_layerGroup%20%3D%20%5B%5BLOTLayerGroup%20alloc%5D%20initWithLayerJSON%3AlayersJSON%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20withAssetGroup%3A_assetGroup%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20withFramerate%3A_framerate%5D%3B%0A%20%20%7D%0A%20%20%0A%20%20%5B_assetGroup%20finalizeInitializationWithFramerate%3A_framerate%5D%3B%0A%7D%0A%60%60%60%0A%0A%E5%9C%A8%E5%AF%B9JSON%E5%AD%97%E5%85%B8%E7%9A%84%E8%A7%A3%E6%9E%90%E8%BF%87%E7%A8%8B%E4%B8%AD%EF%BC%8C%E4%BC%9A%E6%8B%86%E5%88%86%E6%88%90%E5%87%A0%E7%A7%8D%E4%B8%8D%E5%90%8C%E7%9A%84%E4%BF%A1%E6%81%AF%EF%BC%8C%E5%8C%85%E6%8B%AC%EF%BC%9A%E6%95%B4%E4%BD%93%E5%85%B3%E9%94%AE%E5%B8%A7%E4%BF%A1%E6%81%AF%E3%80%81%E6%89%80%E9%9C%80%E5%9B%BE%E7%89%87%E8%B5%84%E6%BA%90%E4%BF%A1%E6%81%AF%E3%80%81%E6%89%80%E6%9C%89%E5%AD%90layer%E7%9A%84%E4%BF%A1%E6%81%AF%E3%80%82%E5%B9%B6%E5%B0%86%E5%9B%BE%E7%89%87%E7%BB%84%E5%92%8Clayer%E7%BB%84%E5%88%86%E5%88%AB%E4%BC%A0%E5%85%A5%E5%88%B0LOTAssetGroup%E5%92%8CLOTLayerGroup%E4%B8%AD%E5%81%9A%E8%BF%9B%E4%B8%80%E6%AD%A5%E5%A4%84%E7%90%86%E3%80%82%0A%0A3%EF%BC%89LOTLayerGroup%E7%B1%BB%E7%94%A8%E4%BA%8E%E8%A7%A3%E6%9E%90JSON%E4%B8%AD%E2%80%9Clayers%E2%80%9D%E5%B1%82%E7%9A%84%E6%95%B0%E6%8D%AE%EF%BC%8C%E5%B9%B6%E5%B0%86%E5%8D%95%E7%8B%AC%E7%9A%84layer%E6%95%B0%E6%8D%AE%E4%BC%A0%E9%80%92%E7%BB%99LOTLayer%E5%A4%84%E7%90%86%E3%80%82%E6%A0%B8%E5%BF%83%E4%BB%A3%E7%A0%81%E5%A6%82%E4%B8%8B%EF%BC%9A%0A%60%60%60%0A-%20(void)_mapFromJSON%3A(NSArray%20*)layersJSON%0A%20%20%20%20%20%20withAssetGroup%3A(LOTAssetGroup%20*%20_Nullable)assetGroup%0A%20%20%20%20%20%20%20withFramerate%3A(NSNumber%20*)framerate%20%7B%0A%20%20%0A%20%20NSMutableArray%20*layers%20%3D%20%5BNSMutableArray%20array%5D%3B%0A%20%20NSMutableDictionary%20*modelMap%20%3D%20%5BNSMutableDictionary%20dictionary%5D%3B%0A%20%20NSMutableDictionary%20*referenceMap%20%3D%20%5BNSMutableDictionary%20dictionary%5D%3B%0A%20%20%0A%20%20for%20(NSDictionary%20*layerJSON%20in%20layersJSON)%20%7B%0A%20%20%20%20LOTLayer%20*layer%20%3D%20%5B%5BLOTLayer%20alloc%5D%20initWithJSON%3AlayerJSON%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20withAssetGroup%3AassetGroup%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20withFramerate%3Aframerate%5D%3B%0A%20%20%20%20%5Blayers%20addObject%3Alayer%5D%3B%0A%20%20%20%20modelMap%5Blayer.layerID%5D%20%3D%20layer%3B%0A%20%20%20%20if%20(layer.referenceID)%20%7B%0A%20%20%20%20%20%20referenceMap%5Blayer.referenceID%5D%20%3D%20layer%3B%0A%20%20%20%20%7D%0A%20%20%7D%0A%20%20%0A%20%20_referenceIDMap%20%3D%20referenceMap%3B%0A%20%20_modelMap%20%3D%20modelMap%3B%0A%20%20_layers%20%3D%20layers%3B%0A%7D%0A%60%60%60%0A4%EF%BC%89%E6%8E%A5%E4%B8%8B%E6%9D%A5%E8%BF%9B%E5%85%A5LOTLayer%E7%B1%BB%E4%B8%AD%EF%BC%8C%E8%BF%99%E9%87%8C%E6%9C%80%E7%BB%88%E6%8A%8Ajson%E6%96%87%E4%BB%B6%E4%B8%AD%E5%8D%95%E4%B8%AAlayer%E5%AF%B9%E5%BA%94%E7%9A%84%E6%95%B0%E6%8D%AE%E6%98%A0%E5%B0%84%E5%87%BA%E6%9D%A5%E3%80%82%0A%60%60%60%0A%40property%20(nonatomic%2C%20readonly)%20NSString%20*layerName%3B%0A%40property%20(nonatomic%2C%20readonly%2C%20nullable)%20NSString%20*referenceID%3B%0A%40property%20(nonatomic%2C%20readonly)%20NSNumber%20*layerID%3B%0A%40property%20(nonatomic%2C%20readonly)%20LOTLayerType%20layerType%3B%0A%40property%20(nonatomic%2C%20readonly%2C%20nullable)%20NSNumber%20*parentID%3B%0A%40property%20(nonatomic%2C%20readonly)%20NSNumber%20*startFrame%3B%0A%40property%20(nonatomic%2C%20readonly)%20NSNumber%20*inFrame%3B%0A%40property%20(nonatomic%2C%20readonly)%20NSNumber%20*outFrame%3B%0A%40property%20(nonatomic%2C%20readonly)%20NSNumber%20*timeStretch%3B%0A%40property%20(nonatomic%2C%20readonly)%20CGRect%20layerBounds%3B%0A%40property%20(nonatomic%2C%20readonly%2C%20nullable)%20NSArray%3CLOTShapeGroup%20*%3E%20*shapes%3B%0A%40property%20(nonatomic%2C%20readonly%2C%20nullable)%20NSArray%3CLOTMask%20*%3E%20*masks%3B%0A%60%60%60%0A%0A%E4%BB%A5%E4%B8%8A%E5%B1%9E%E6%80%A7%E5%92%8Cjson%E6%96%87%E4%BB%B6%E5%AF%B9%E5%BA%94%E7%9A%84key%E6%9C%89%E4%B8%80%E4%B8%80%E5%AF%B9%E5%BA%94%E5%85%B3%E7%B3%BB%EF%BC%8C%E6%AF%94%E5%A6%82layerName%E5%AF%B9%E5%BA%94json%E6%96%87%E4%BB%B6%E4%B8%AD%E7%9A%84nm%EF%BC%8ClayerType%E5%AF%B9%E5%BA%94ty%E7%AD%89%E7%AD%89%EF%BC%8C%E6%AF%8F%E4%B8%AAlayer%E4%B8%AD%E5%8C%85%E5%90%ABLayer%E6%89%80%E9%9C%80%E7%9A%84%E5%9F%BA%E6%9C%AC%E4%BF%A1%E6%81%AF%EF%BC%8Ctransform%E5%8F%98%E5%8C%96%E9%9C%80%E8%A6%81%E7%9A%84%E5%88%99%E6%98%AF%E6%AF%8F%E4%B8%AALOTKeyframeGroup%20%E7%B1%BB%E5%9E%8B%E7%9A%84%E5%B1%9E%E6%80%A7%E3%80%82%E8%BF%99%E9%87%8C%E9%9D%A2%E5%8C%85%E5%90%AB%E4%BA%86%E8%AF%A5Layer%20%E7%9A%84%20transform%E5%8F%98%E5%8C%96%E7%9A%84%E5%85%B3%E9%94%AE%E5%B8%A7%E6%95%B0%E7%BB%84%EF%BC%8C%E8%80%8Cmasks%20%E5%92%8C%20shapes%20%E7%9A%84%E4%BF%A1%E6%81%AF%E5%8C%85%E5%90%AB%E5%9C%A8%E4%B8%8A%E9%9D%A2%E7%9A%84%E4%B8%A4%E4%B8%AA%E5%90%8C%E5%90%8D%E6%95%B0%E7%BB%84%E4%B8%AD%E3%80%82%0A%0A5)%E5%89%8D%E9%9D%A2%E5%9B%9B%E6%AD%A5%EF%BC%8C%E5%B7%B2%E7%BB%8F%E6%8A%8A%E5%8A%A8%E7%94%BB%E9%9C%80%E8%A6%81%E7%9A%84%E6%95%B0%E6%8D%AE%E5%85%A8%E9%83%A8%E5%87%86%E5%A4%87%E5%A5%BD%E4%BA%86%EF%BC%8C%E6%8E%A5%E4%B8%8B%E6%9D%A5%E5%B0%B1%E9%9C%80%E8%A6%81%E8%BF%9B%E8%A1%8C%E5%8A%A8%E7%94%BB%E6%98%BE%E7%A4%BA%E3%80%82%0A%E6%9C%80%E5%BA%95%E5%B1%82%E7%9A%84LOTLayerContainer%E7%BB%A7%E6%89%BF%E8%87%AACALayer%EF%BC%8C%E6%B7%BB%E5%8A%A0%E4%BA%86currentFrame%E5%B1%9E%E6%80%A7%EF%BC%8CLOTCompositionContainer%E5%8F%88%E6%98%AF%E7%BB%A7%E6%89%BF%E8%87%AALOTLayerContainer%EF%BC%8C%E4%B8%BALOTCompositionContainer%E5%AF%B9%E8%B1%A1%E6%B7%BB%E5%8A%A0%E4%BA%86%E4%B8%80%E4%B8%AACABaseAnimation%E5%8A%A8%E7%94%BB%EF%BC%8C%E7%84%B6%E5%90%8E%E9%87%8D%E5%86%99CALayer%E7%9A%84display%E6%96%B9%E6%B3%95%EF%BC%8C%E5%9C%A8display%E6%96%B9%E6%B3%95%E4%B8%AD%E9%80%9A%E8%BF%87%20CALayer%E4%B8%AD%E7%9A%84presentationLayer%E8%8E%B7%E5%8F%96%E5%9C%A8%E5%8A%A8%E7%94%BB%E4%B8%AD%E5%8F%98%E5%8C%96%E7%9A%84currentFrame%E6%95%B0%E5%80%BC%20%EF%BC%8C%E5%86%8D%E9%80%9A%E8%BF%87%E9%81%8D%E5%8E%86%E6%AF%8F%E4%B8%80%E4%B8%AA%E5%AD%90layer%EF%BC%8C%E5%B0%86%E6%9B%B4%E6%96%B0%E5%90%8E%E7%9A%84currentFrame%E4%BC%A0%E5%85%A5%EF%BC%8C%E6%9D%A5%E5%AE%9E%E6%97%B6%E6%9B%B4%E6%96%B0%E6%AF%8F%E4%B8%80%E4%B8%AA%E5%AD%90Layer%E7%9A%84%E6%98%BE%E7%A4%BA%E3%80%82%E6%A0%B8%E5%BF%83%E4%BB%A3%E7%A0%81%E5%9C%A8LOTLayerContainer%E4%B8%AD%EF%BC%8C%E5%A6%82%E4%B8%8B%EF%BC%9A%0A%60%60%60%0A-%20(void)displayWithFrame%3A(NSNumber%20*)frame%20forceUpdate%3A(BOOL)forceUpdate%20%7B%0A%20%20NSNumber%20*newFrame%20%3D%20%40(frame.floatValue%20%2F%20self.timeStretchFactor.floatValue)%3B%0A%20%20if%20(ENABLE_DEBUG_LOGGING)%20NSLog(%40%22View%20%25%40%20Displaying%20Frame%20%25%40%2C%20with%20local%20time%20%25%40%22%2C%20self%2C%20frame%2C%20newFrame)%3B%0A%20%20BOOL%20hidden%20%3D%20NO%3B%0A%20%20if%20(_inFrame%20%26%26%20_outFrame)%20%7B%0A%20%20%20%20hidden%20%3D%20(frame.floatValue%20%3C%20_inFrame.floatValue%20%7C%7C%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20frame.floatValue%20%3E%20_outFrame.floatValue)%3B%0A%20%20%7D%0A%20%20self.hidden%20%3D%20hidden%3B%0A%20%20if%20(hidden)%20%7B%0A%20%20%20%20return%3B%0A%20%20%7D%0A%20%20if%20(_opacityInterpolator%20%26%26%20%5B_opacityInterpolator%20hasUpdateForFrame%3AnewFrame%5D)%20%7B%0A%20%20%20%20self.opacity%20%3D%20%5B_opacityInterpolator%20floatValueForFrame%3AnewFrame%5D%3B%0A%20%20%7D%0A%20%20if%20(_transformInterpolator%20%26%26%20%5B_transformInterpolator%20hasUpdateForFrame%3AnewFrame%5D)%20%7B%0A%20%20%20%20_wrapperLayer.transform%20%3D%20%5B_transformInterpolator%20transformForFrame%3AnewFrame%5D%3B%0A%20%20%7D%0A%20%20%5B_contentsGroup%20updateWithFrame%3AnewFrame%20withModifierBlock%3Anil%20forceLocalUpdate%3AforceUpdate%5D%3B%0A%20%20_maskLayer.currentFrame%20%3D%20newFrame%3B%0A%7D%0A%60%60%60%0A%0A%E5%AE%83%E5%AE%9E%E9%99%85%E4%B8%8A%E5%AE%8C%E6%88%90%E4%BA%86%E4%BB%A5%E4%B8%8B%E5%87%A0%E4%BB%B6%E4%BA%8B%EF%BC%9A%0A1.%E6%A0%B9%E6%8D%AE%E5%AD%90Layer%E7%9A%84%E8%B5%B7%E5%A7%8B%E5%B8%A7%E5%92%8C%E7%BB%93%E6%9D%9F%E5%B8%A7%E5%88%A4%E6%96%AD%E5%BD%93%E5%89%8D%E5%B8%A7%E5%AD%90Layer%E6%98%AF%E5%90%A6%E6%98%BE%E7%A4%BA%0A2.%E6%9B%B4%E6%96%B0%E5%AD%90Layer%E5%BD%93%E5%89%8D%E5%B8%A7%E7%9A%84%E9%80%8F%E6%98%8E%E5%BA%A6%0A3.%E6%9B%B4%E6%96%B0%E5%AD%90Layer%E5%BD%93%E5%89%8D%E5%B8%A7%E7%9A%84transform%0A4.%E6%9B%B4%E6%96%B0%E5%AD%90Layer%E4%B8%AD%E8%B7%AF%E5%BE%84%E5%92%8C%E5%BD%A2%E7%8A%B6%E7%AD%89%E5%86%85%E5%AE%B9%E7%9A%84%E5%8F%98%E5%8C%96%0A%0A6%EF%BC%89%E4%B8%8A%E9%9D%A2%E5%8A%A8%E7%94%BB%E6%98%BE%E7%A4%BA%E7%9A%842%EF%BC%8C3%EF%BC%8C4%E6%AD%A5%E9%83%BD%E6%98%AF%E9%80%9A%E8%BF%87XXInterpolator%E8%BF%99%E4%BA%9B%E7%B1%BB%EF%BC%8C%E6%9D%A5%E4%BB%8E%E5%BD%93%E5%89%8Dframe%E4%B8%AD%E8%AE%A1%E7%AE%97%E5%87%BA%E6%88%91%E4%BB%AC%E9%9C%80%E8%A6%81%E7%9A%84%E5%80%BC%EF%BC%8C%E6%88%91%E4%BB%AC%E4%BB%A5LOTTransformInterpolator%E4%B8%BA%E4%BE%8B%EF%BC%8C%E5%85%B6%E4%BB%96%E7%B1%BB%E4%BC%BC%EF%BC%8C%E7%9C%8B%E7%9C%8B%E5%AE%83%E9%83%BD%E6%9C%89%E4%BA%9B%E4%BB%80%E4%B9%88%EF%BC%9A%0A%60%60%60%0A%40property%20(nonatomic%2C%20readonly)%20LOTPointInterpolator%20*positionInterpolator%3B%0A%40property%20(nonatomic%2C%20readonly)%20LOTPointInterpolator%20*anchorInterpolator%3B%0A%40property%20(nonatomic%2C%20readonly)%20LOTSizeInterpolator%20*scaleInterpolator%3B%0A%40property%20(nonatomic%2C%20readonly)%20LOTNumberInterpolator%20*rotationInterpolator%3B%0A%40property%20(nonatomic%2C%20readonly)%20LOTNumberInterpolator%20*positionXInterpolator%3B%0A%40property%20(nonatomic%2C%20readonly)%20LOTNumberInterpolator%20*positionYInterpolator%3B%0A%60%60%60%0A%0A%E9%92%88%E5%AF%B9transform%E5%8F%98%E6%8D%A2%E9%9C%80%E8%A6%81%E5%BE%88%E5%A4%9A%E7%9A%84%E4%BF%A1%E6%81%AF%EF%BC%8CLOTTransformInterpolator%E4%B8%AD%E6%8F%90%E4%BE%9B%E4%BA%86%E8%BF%99%E4%BA%9B%E6%89%80%E9%9C%80%E7%9A%84%E4%BF%A1%E6%81%AF%E3%80%82%0A%0A%E5%BD%93%E4%BC%A0%E5%85%A5%E5%BD%93%E5%89%8Dframe%E6%97%B6%EF%BC%8C%E8%BF%99%E4%BA%9Binterpolator%E4%BC%9A%E8%BF%94%E5%9B%9E%E4%B8%8D%E5%90%8C%E7%9A%84%E6%95%B0%E5%80%BC%EF%BC%8C%E4%BB%8E%E8%80%8C%E7%BB%84%E6%88%90%E5%BD%93%E5%89%8D%E7%9A%84transform%E3%80%82%E8%BF%99%E4%BA%9B%E4%B8%8D%E5%90%8C%E7%9A%84Interpolar%E4%BC%9A%E6%A0%B9%E6%8D%AE%E8%87%AA%E5%B7%B1%E7%9A%84%E7%AE%97%E6%B3%95%E8%BF%94%E5%9B%9E%E5%BD%93%E5%89%8D%E6%89%80%E9%9C%80%E8%A6%81%E7%9A%84%E5%80%BC%EF%BC%8C%E4%BD%86%E6%98%AF%E4%BB%96%E4%BB%AC%E5%A4%A7%E4%BD%93%E7%9A%84%E6%B5%81%E7%A8%8B%E9%83%BD%E6%98%AF%E4%B8%80%E6%A0%B7%E7%9A%84%EF%BC%9A%0A%0A1.%E5%9C%A8%E5%85%B3%E9%94%AE%E5%B8%A7%E6%95%B0%E7%BB%84%E4%B8%AD%E6%89%BE%E5%88%B0%E5%BD%93%E5%89%8Dframe%E7%9A%84%E5%89%8D%E4%B8%80%E4%B8%AA%E5%85%B3%E9%94%AE%E5%B8%A7%EF%BC%88leadingKeyframe%EF%BC%89%E5%92%8C%E5%90%8E%E4%B8%80%E4%B8%AA%E5%85%B3%E9%94%AE%E5%B8%A7%EF%BC%88trailingKeyframe%EF%BC%89%0A2.%E8%AE%A1%E7%AE%97%E5%BD%93%E5%89%8Dframe%20%E5%9C%A8%20leadingKeyframe%20%E5%92%8C%20trailingKeyframe%20%E7%9A%84%E8%BF%9B%E5%BA%A6%EF%BC%88progress%EF%BC%89%0A3.%E6%A0%B9%E6%8D%AE%E8%BF%99%E4%B8%AAprogress%E4%BB%A5%E5%8F%8A%20leadingKeyframe%EF%BC%8CtrailingKeyframe%E7%AE%97%E5%87%BA%E5%BD%93%E5%89%8Dframe%E4%B8%8B%E7%9A%84%E5%80%BC%E3%80%82%EF%BC%88%E4%B8%8D%E5%90%8C%E7%9A%84Interpolator%E7%AE%97%E6%B3%95%E4%B8%8D%E5%90%8C%EF%BC%89%0A%0A%E6%80%BB%E7%BB%93%EF%BC%9A%0ALottie%E6%8F%90%E4%BE%9B%E4%BA%86%E5%A4%9A%E7%A7%8D%E4%BE%BF%E5%88%A9%E7%9A%84%E6%96%B9%E5%BC%8F%EF%BC%8C%E4%BE%9B%E6%88%91%E4%BB%AC%E5%8A%A0%E8%BD%BD%E9%85%B7%E7%82%AB%E7%9A%84%E5%8A%A8%E7%94%BB%EF%BC%8C%E5%AF%B9%E7%94%A8%E6%88%B7%E4%BD%93%E9%AA%8C%E6%9C%89%E6%9E%81%E5%A4%A7%E7%9A%84%E6%8F%90%E5%8D%87%E3%80%82%E5%AF%B9%E4%BD%BF%E7%94%A8%E8%80%85%E6%9D%A5%E8%AF%B4%EF%BC%8C%E5%8F%AA%E9%9C%80%E8%A6%81%E5%BC%95%E5%85%A5%E5%8C%85%E5%90%AB%E5%8A%A8%E6%95%88%E7%9A%84json%E6%96%87%E4%BB%B6%E5%92%8C%E8%B5%84%E6%BA%90%E6%96%87%E4%BB%B6%EF%BC%8C%E8%B0%83%E7%94%A8lottie%E6%8F%90%E4%BE%9B%E7%9A%84%E5%B1%9E%E6%80%A7%E5%92%8Capi%E5%AE%8C%E6%88%90%E5%8A%A8%E7%94%BB%E7%BB%98%E5%88%B6%E3%80%82Lottie%E5%86%85%E9%83%A8%E5%B8%AE%E6%88%91%E4%BB%AC%E5%81%9A%E4%BA%86json%E6%96%87%E4%BB%B6%E6%98%A0%E5%B0%84%E5%88%B0%E4%B8%8D%E5%90%8C%E7%B1%BB%E7%9A%84%E4%B8%8D%E5%90%8C%E5%B1%9E%E6%80%A7%E4%B8%AD%EF%BC%8C%E9%80%9A%E8%BF%87%E4%B8%80%E7%B3%BB%E5%88%97%E7%9A%84%E8%AE%A1%E7%AE%97%EF%BC%8C%E7%A1%AE%E5%AE%9A%E5%87%BA%E6%AF%8F%E4%B8%80%E5%B8%A7%E7%9A%84%E6%95%B0%E6%8D%AE%EF%BC%8C%E7%84%B6%E5%90%8E%E5%AE%8C%E7%BE%8E%E7%9A%84%E6%98%BE%E7%A4%BA%E5%9C%A8%E5%B1%8F%E5%B9%95%E4%B8%8A%EF%BC%8C%E8%BF%99%E6%A0%B7%E7%9A%84%E7%A5%9E%E5%99%A8%EF%BC%8C%E4%BB%A5%E5%90%8E%E8%A6%81%E5%A4%9A%E5%A4%9A%E7%94%A8%E8%B5%B7%E6%9D%A5%E5%95%A6%EF%BC%81%0A%0A-----%0A%0A%E5%8F%82%E8%80%83%E6%96%87%E7%AB%A0%EF%BC%9A%5BLottie%E5%8A%A8%E7%94%BB%E4%BD%BF%E7%94%A8%E5%8F%8A%E5%8E%9F%E7%90%86%E5%88%86%E6%9E%90%5D(https%3A%2F%2Fblog.csdn.net%2Fstudying_ios%2Farticle%2Fdetails%2F90898282)%0A%5BYYText%20%E6%BA%90%E7%A0%81%E5%89%96%E6%9E%90%EF%BC%9ACoreText%20%E4%B8%8E%E5%BC%82%E6%AD%A5%E7%BB%98%E5%88%B6%5D(https%3A%2F%2Fcloud.tencent.com%2Fdeveloper%2Farticle%2F1403845)%0A%5BYYImage%20%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF%EF%BC%8C%E5%AE%9E%E7%8E%B0%E7%BB%86%E8%8A%82%E5%89%96%E6%9E%90%5D(https%3A%2F%2Flision.me%2Ftags%2Fyykit%2F)%0A</center></body></html>
